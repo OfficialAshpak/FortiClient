@@ -1,0 +1,426 @@
+# FortiClient Uninstall Script (Advanced | Intune Ready)
+
+A production-grade PowerShell script to fully remove FortiClient from Windows endpoints. Built for enterprise environments with safe uninstall logic, reboot orchestration, and post-removal cleanup.
+
+---
+
+## 🚀 Key Features
+
+* 🔍 Detects all installed FortiClient components (32-bit & 64-bit)
+* ⚙️ Supports:
+
+  * MSI uninstall (GUID-based)
+  * EXE uninstall (fallback with safe parsing)
+* 🚫 Supports exclusion of specific GUIDs
+* 🔁 Retry-safe (ideal for Intune remediation)
+* 🔄 Handles pending reboot scenarios gracefully
+* 🧹 Performs deep cleanup (services + leftover folders)
+* 📢 User reboot notification (15-minute countdown)
+* 📝 Detailed logging for troubleshooting
+
+---
+
+## 📁 Log File Location
+
+```text
+C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\FortiClient_Uninstall.log
+```
+
+---
+
+## ▶️ Usage
+
+Run in **elevated PowerShell (Administrator)**:
+
+```powershell
+.\FortiClient-Uninstall.ps1
+```
+
+---
+
+## ⚙️ Script Workflow
+
+### 1. Pre-Checks
+
+* Ensures log directory exists
+* Detects pending reboot:
+
+  * If found → exits safely (prevents deployment failures)
+
+---
+
+### 2. Application Discovery
+
+Searches registry:
+
+* `HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall`
+* `HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall`
+
+Filters:
+
+* Matches `FortiClient`
+* Ignores null display names
+* Removes duplicates
+
+---
+
+### 3. GUID Exclusion Logic
+
+The script allows skipping specific MSI packages:
+
+```powershell
+if ($app.PSChildName -eq "{}") {
+    continue
+}
+```
+
+👉 Useful when:
+
+* You want to preserve VPN-only module
+* Exclude a known problematic version
+* Avoid removing dependent components
+
+---
+
+### 4. Uninstall Methods
+
+#### MSI Uninstall
+
+```powershell
+msiexec /x {GUID} /quiet /norestart
+```
+
+Handled exit codes:
+
+* `0` → Success
+* `1605` → Already removed
+* `3010` → Reboot required (auto-handled)
+
+---
+
+#### EXE Uninstall
+
+* Safely parses uninstall string
+* Auto-adds:
+
+  * `/quiet`
+  * `/norestart`
+
+Prevents:
+
+* Broken command parsing
+* Missing silent switches
+
+---
+
+### 5. Reboot Handling
+
+If required:
+
+* Notifies user:
+
+  ```
+  Restart required in 15 minutes
+  ```
+
+* Schedules reboot:
+
+```powershell
+shutdown.exe /r /t 900
+```
+
+* Prevents duplicate scheduling
+
+---
+
+### 6. Post-Uninstall Cleanup
+
+Removes:
+
+#### Services
+
+* Matches patterns:
+
+  * `Forti`
+  * `FC`
+
+#### Folders
+
+* `C:\Program Files\Fortinet`
+* `C:\Program Files (x86)\Fortinet`
+* `C:\ProgramData\Fortinet`
+
+---
+
+## 📊 Exit Codes
+
+| Code | Meaning                   |
+| ---- | ------------------------- |
+| 0    | Success                   |
+| 3010 | Success (Reboot required) |
+| 1605 | Product already removed   |
+| 1+   | Failure                   |
+
+---
+
+## 🏢 Enterprise Use Cases
+
+* Microsoft Intune remediation scripts
+* SCCM uninstall deployments
+* Security agent replacement
+* Automated endpoint cleanup
+
+---
+
+## 🔒 Design Principles
+
+* ✔ Idempotent (safe to run multiple times)
+* ✔ Silent execution
+* ✔ Minimal user disruption
+* ✔ Robust error handling
+* ✔ Enterprise logging standard
+
+---
+
+## 🛠️ Requirements
+
+* Windows 10 / 11
+* PowerShell 5.1+
+* Administrator privileges
+
+---
+
+## 📌 Best Practices
+
+* Test in pilot group before full deployment
+* Use with Intune:
+
+  * Detection script + remediation script
+* Monitor logs for validation
+* Customize GUID exclusion if needed
+
+---
+
+## ✍️ Author
+
+Ashpak SHaikh
+
+---
+
+## 📄 License
+
+MIT License (recommended)
+
+---
+
+## ⭐ Contributing
+
+Pull requests and improvements are welcome via GitHub.
+
+
+
+
+
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+$AppName = "FortiClient"
+$LogPath = "$env:ProgramData\Microsoft\IntuneManagementExtension\Logs\FortiClient_Uninstall.log"
+
+# Ensure log directory exists
+$logDir = Split-Path $LogPath
+if (-not (Test-Path $logDir)) {
+    New-Item -Path $logDir -ItemType Directory -Force | Out-Null
+}
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+function Write-Log {
+    param([string]$Message, [string]$Level = "INFO")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $entry = "[$timestamp] [$Level] $Message"
+    Add-Content -Path $LogPath -Value $entry -Force
+    Write-Output $entry
+}
+
+# ── Pending Reboot Check (robust, parser-safe) ────────────────────────────────
+function Test-PendingReboot {
+    $r1 = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending"
+    $r2 = Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired"
+    return ($r1 -or $r2)
+}
+
+# ── Get Installed Apps ────────────────────────────────────────────────────────
+function Get-InstalledApps {
+    param([string]$Name)
+
+    $paths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    foreach ($path in $paths) {
+        Get-ItemProperty $path -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -and $_.DisplayName -like "*$Name*" }
+    }
+}
+
+# ── EXE Uninstall Helper (safe parsing) ───────────────────────────────────────
+function Invoke-ExeUninstall {
+    param($UninstallString)
+
+    if ($UninstallString -match '^"(.+?)"\s*(.*)$') {
+        $exe  = $matches[1]
+        $args = $matches[2]
+    } else {
+        $parts = $UninstallString.Split(" ", 2)
+        $exe  = $parts[0]
+        $args = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+    }
+
+    # Add silent flags if not already present
+    if ($args -notmatch "/quiet") { $args += " /quiet" }
+    if ($args -notmatch "/norestart") { $args += " /norestart" }
+
+    Write-Log "Executing EXE uninstall: $exe $args"
+
+    try {
+        $proc = Start-Process $exe -ArgumentList $args -Wait -PassThru -ErrorAction Stop
+        Write-Log "EXE exit code: $($proc.ExitCode)"
+        return $proc.ExitCode
+    }
+    catch {
+        Write-Log "EXE uninstall exception: $($_.Exception.Message)" "ERROR"
+        return 1
+    }
+}
+
+# ── Reboot Notification (15 min, retry-safe) ──────────────────────────────────
+function Invoke-RebootNotification {
+    Write-Log "Triggering reboot notification (15 minutes)." "WARN"
+
+    # Notify user (works from SYSTEM)
+    try {
+        msg * "Your device requires a restart to complete FortiClient removal. The system will reboot in 15 minutes. Please save your work."
+    } catch {
+        Write-Log "User notification failed (msg.exe)." "WARN"
+    }
+
+    # Prevent duplicate scheduling
+    $shutdownScheduled = (Get-CimInstance Win32_OperatingSystem).LastBootUpTime -ne $null -and `
+                         (Get-Process -Name "shutdown" -ErrorAction SilentlyContinue)
+
+    if (-not $shutdownScheduled) {
+        shutdown.exe /r /t 900 /c "Restart required to complete FortiClient removal."
+    } else {
+        Write-Log "Shutdown already scheduled." "INFO"
+    }
+}
+
+# ── FortiClient Cleanup ───────────────────────────────────────────────────────
+function Invoke-FortiCleanup {
+    Write-Log "Starting FortiClient cleanup..."
+
+    # Stop known services (names can vary by version)
+    $servicePatterns = @("Forti", "FC")
+    $services = Get-Service -ErrorAction SilentlyContinue | Where-Object {
+        $name = $_.Name + " " + $_.DisplayName
+        $servicePatterns | ForEach-Object { if ($name -match $_) { return $true } }
+    }
+
+    foreach ($svc in $services) {
+        try {
+            Write-Log "Stopping service: $($svc.Name)"
+            Stop-Service $svc.Name -Force -ErrorAction SilentlyContinue
+        } catch {}
+    }
+
+    # Remove leftover folders
+    $paths = @(
+        "$env:ProgramFiles\Fortinet",
+        "$env:ProgramFiles(x86)\Fortinet",
+        "$env:ProgramData\Fortinet"
+    )
+
+    foreach ($path in $paths) {
+        if (Test-Path $path) {
+            Write-Log "Removing folder: $path"
+            Remove-Item $path -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+Write-Log "========== Starting FortiClient uninstall =========="
+
+# Exit early if reboot pending (retry-safe)
+if (Test-PendingReboot) {
+    Write-Log "System pending reboot. Exiting safely." "WARN"
+    exit 0
+}
+
+$apps = Get-InstalledApps -Name $AppName | Sort-Object DisplayName -Unique
+
+if (-not $apps) {
+    Write-Log "FortiClient not found. Nothing to uninstall."
+    exit 0
+}
+
+Write-Log "Total components found: $($apps.Count)"
+
+foreach ($app in $apps) {
+
+    # 🔹 Exclude specific GUID
+    if ($app.PSChildName -eq "{}") {
+        Write-Log "Skipping excluded GUID: $($app.DisplayName)"
+        continue
+    }
+
+    Write-Log "Processing: $($app.DisplayName)"
+
+    # MSI uninstall
+    if ($app.PSChildName -match '^\{.*\}$') {
+
+        Write-Log "Using MSI uninstall: $($app.PSChildName)"
+
+        $proc = Start-Process "msiexec.exe" `
+            -ArgumentList "/x `"$($app.PSChildName)`" /quiet /norestart" `
+            -Wait -PassThru
+
+        $code = $proc.ExitCode
+        Write-Log "MSI exit code: $code"
+
+        if ($code -eq 3010) {
+            Invoke-RebootNotification
+            exit 0
+        }
+        elseif ($code -notin @(0,1605)) {
+            Write-Log "MSI uninstall failed." "ERROR"
+            exit $code
+        }
+    }
+
+    # EXE uninstall
+    elseif ($app.UninstallString) {
+
+        $code = Invoke-ExeUninstall $app.UninstallString
+
+        if ($code -eq 3010) {
+            Invoke-RebootNotification
+            exit 0
+        }
+        elseif ($code -ne 0) {
+            Write-Log "EXE uninstall failed." "ERROR"
+            exit $code
+        }
+    }
+
+    else {
+        Write-Log "No valid uninstall method found." "ERROR"
+        exit 1
+    }
+}
+
+# Cleanup leftovers after uninstall
+Invoke-FortiCleanup
+
+Write-Log "FortiClient uninstall completed successfully."
+exit 0
