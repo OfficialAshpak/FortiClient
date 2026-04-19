@@ -1,0 +1,129 @@
+# FortiClient Uninstall Script
+
+This PowerShell script removes FortiClient from Windows devices using MSI or EXE uninstall methods.
+
+## Features
+- Detects installed FortiClient versions
+- Supports MSI and EXE uninstall
+- Silent uninstall (/quiet /norestart)
+- Logging for troubleshooting
+- Safe exit codes for automation tools (Intune, SCCM)
+
+## Log Location
+C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\FortiClient_Uninstall.log
+
+## Usage
+
+Run in elevated PowerShell:
+
+```powershell
+.\FortiClient-Uninstall.ps1
+```
+
+## Exit Codes
+- 0 = Success
+- 3010 = Success (reboot required)
+- Others = Failure
+
+## Use Cases
+- Microsoft Intune remediation scripts
+- SCCM deployments
+- Manual cleanup
+
+## Author
+Ashpak Shaikh
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ── Configuration ─────────────────────────────────────────────────────────────
+$LogPath = "$env:ProgramData\Microsoft\IntuneManagementExtension\Logs\FortiClient_Uninstall.log"
+$AppName = "FortiClient"
+
+# Ensure log folder exists
+$logDir = Split-Path $LogPath
+if (-not (Test-Path $logDir)) {
+    New-Item -Path $logDir -ItemType Directory -Force | Out-Null
+}
+
+# ── Logging helper ────────────────────────────────────────────────────────────
+function Write-Log {
+    param([string]$Message, [string]$Level = "INFO")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $entry     = "[$timestamp] [$Level] $Message"
+    Add-Content -Path $LogPath -Value $entry -Force
+    Write-Output $entry
+}
+
+# ── Detect installed apps via registry ───────────────────────────────────────
+function Get-InstalledApps {
+    param([string]$Name)
+
+    $regPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*"
+    )
+
+    foreach ($path in $regPaths) {
+        Get-ItemProperty $path -ErrorAction SilentlyContinue |
+            Where-Object { $_.DisplayName -like "*$Name*" }
+    }
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+Write-Log "Starting $AppName uninstall script."
+
+$apps = Get-InstalledApps -Name $AppName
+
+if (-not $apps) {
+    Write-Log "$AppName not found. Nothing to uninstall."
+    exit 0
+}
+
+foreach ($app in $apps) {
+    Write-Log "Found: $($app.DisplayName)"
+
+    if ($app.PSChildName -match '^\{.*\}$') {
+        # MSI uninstall
+        Write-Log "Using MSI uninstall. GUID: $($app.PSChildName)"
+        $proc = Start-Process "msiexec.exe" `
+            -ArgumentList "/x `"$($app.PSChildName)`" /quiet /norestart" `
+            -Wait -PassThru
+
+        Write-Log "msiexec exit code: $($proc.ExitCode)"
+
+        if ($proc.ExitCode -notin @(0,3010,1605)) {
+            Write-Log "MSI uninstall failed." "ERROR"
+            exit $proc.ExitCode
+        }
+    }
+    elseif ($app.UninstallString) {
+        # Fallback EXE uninstall
+        Write-Log "Using uninstall string."
+        Start-Process "cmd.exe" `
+            -ArgumentList "/c $($app.UninstallString) /quiet /norestart" `
+            -Wait
+    }
+    else {
+        Write-Log "No supported uninstall method found." "ERROR"
+        exit 1
+    }
+}
+
+Write-Log "All FortiClient components removed successfully."
+exit 0
